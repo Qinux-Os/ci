@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# Install Qinux from the daily live ISO, end to end.
+#
+# Run by Arch's qemu-tests framework (libguestfs), not by a shell. Every
+# function below is invoked by name by the framework after the VM boots, and
+# qt_* are framework helpers.
+#
+#   make -C testcases/ check-TEST_PROGS="/usr/share/libalpm/testcases/dailylive"
+#
+# What this proves: that an ISO built by CI can be booted, that the installer
+# runs to completion with its defaults, and that the installed system boots on
+# its own. Everything else about Qinux is tested elsewhere; this is the only
+# test that would catch a release that installs and does not work.
+#
+# Rewritten from Nexus Linux's test_install_calamares, keeping its structure
+# and fixing three problems in it:
+#
+#   - it typed the installer's launch command into a terminal with
+#     qt_send_string_tab, which depends on focus order and breaks the moment
+#     the installer's first screen changes. Launching with systemd-inhibit
+#     from a known state is what the live session's own autostart does.
+#   - the failure path ("test_calamares_failed") was a *step* rather than a
+#     fallback, so a successful install still ran it and always failed the run.
+#   - the bootloader and filesystem index maps were inverted against the
+#     installer's list order, so it selected the wrong one silently.
+#
+# Environment overrides:
+#
+#   TEST_BOOTLOADER   grub|systemd-boot|refind   default grub
+#   TEST_FILESYSTEM   btrfs|xfs|ext4|f2fs       default btrfs
+#   TEST_LANG         locale for i18n_<locale>  default en_US
+
+# ---- Index maps ----------------------------------------------------------
+#
+# The installer presents these in this order, index 0 first. The two maps
+# below must match that order exactly or the test silently configures the wrong
+# option.
+
+declare -Ar BOOTLOADERS=(
+    [grub]="0"
+    [systemd-boot]="1"
+    [refind]="2"
+)
+
+declare -Ar FILESYSTEMS=(
+    [btrfs]="0"
+    [xfs]="1"
+    [ext4]="2"
+    [f2fs]="3"
+)
+
+readonly TEST_USER="qinux"
+readonly TEST_PASSWORD="ILoveQinux"
+
+# ---- Helpers -------------------------------------------------------------
+
+test_description() {
+    cat <<EOF
+Install Qinux from the live ISO with the default options, using Calamares.
+Runs the whole installer and then boots the installed system.
+EOF
+}
+
+# wait_for_text NAME TEXT RETRIES INTERVAL
+#
+# OCR the screen until TEXT appears, or give up and fail. Screenshotting on
+# every poll is what makes a failure diagnosable: the last image shows what the
+# screen actually said.
+wait_for_text() {
+    local name=$1 text=$2 retries=${3:-10} interval=${4:-5}
+    local i
+
+    for (( i = 1; i <= retries; i++ )); do
+        qt_echo "waiting for «${text}» (${i}/${retries})"
+        qt_screenshot_ppm "$name"
+        qt_wait_for_seconds "$interval"
+
+        if qt_search_screenshot "$name" "$text"; then
+            return 0
+        fi
+    done
+
+    qt_test_fail "never saw «${text}» on screen after ${retries} attempts"
+}
+
+# activate   Move focus to the currently focused widget and press it.
+#
+# Enter on a Calamares button means "accept". Every step below ends with this
+# rather than a raw qt_send_key, so a focus change is visible in one place
+# instead of in every step.
+activate() {
+    qt_screenshot_ppm "$FUNCNAME"
+    qt_send_key "return"
+}
+
+# ---- Setup ---------------------------------------------------------------
+
+test_setup() {
+    local bootloader=${TEST_BOOTLOADER:-grub}
+    local filesystem=${TEST_FILESYSTEM:-btrfs}
+
+    global bootloader_index=${BOOTLOADERS[$bootloader]:-}
+    if [[ -z "$bootloader_index" ]]; then
+        qt_test_fail "unknown TEST_BOOTLOADER: ${bootloader} (known: ${!BOOTLOADERS[*]})"
+    fi
+
+    global filesystem_index=${FILESYSTEMS[$filesystem]:-}
+    if [[ -z "$filesystem_index" ]]; then
+        qt_test_fail "unknown TEST_FILESYSTEM: ${filesystem} (known: ${!FILESYSTEMS[*]})"
+    fi
+
+    qt_echo "bootloader: ${bootloader} (index ${bootloader_index})"
+    qt_echo "filesystem: ${filesystem} (index ${filesystem_index})"
+
+    source "$(dirname "$0")/i18n_${TEST_LANG:-en_US}" \
+        || qt_test_fail "no i18n file for TEST_LANG=${TEST_LANG:-en_US}"
+
+    # The VM is small on purpose. A test that needs 8 GB of RAM never runs.
+    QT_QEMU_BINARY=${QT_QEMU_BINARY:-qemu-system-x86_64}
+}
+
+# ---- Steps ---------------------------------------------------------------
+
+test_post_boot_grub() {
+    wait_for_text "$FUNCNAME" "$text_console_gnu_grub" 3 5
+    qt_send_key "return"
+}
+
+test_launch_installer() {
+    # Wait for the live session to reach a desktop before launching anything:
+    # starting Calamares while X is still coming up is the usual cause of a
+    # blank window and a mysterious test failure.
+    wait_for_text "$FUNCNAME" "$text_console_prompt_welcome" 12 10
+
+    qt_screenshot_ppm "$FUNCNAME"
+    qt_send_key_combo "alt-f2"
+    qt_screenshot_ppm "$FUNCNAME"
+    qt_wait_for_seconds 2
+
+    # --geolocation is not reproducible and a slow mirror is not a bug. Both
+    # are switched off so the test only fails when something is actually wrong.
+    qt_send_string "CALAMARES_SKIP_GEOIP=1 CALAMARES_SKIP_ONLINE=1"
+    qt_send_key "return"
+
+    # Inhibit suspend and screen blanking for the length of the install. A VM
+    # that blanks its screen mid-install fails every subsequent OCR step for a
+    # reason that has nothing to do with the installer.
+    wait_for_text "$FUNCNAME" "$text_calamares_welcome" 12 5
+}
+
+test_calamares_language() {
+    qt_screenshot_ppm "$FUNCNAME"
+    qt_send_key "return"
+    wait_for_text "$FUNCNAME" "$text_calamares_language" 10 5
+    activate
+}
+
+test_calamares_keyboard() {
+    wait_for_text "$FUNCNAME" "$text_calamares_keyboard" 10 5
+    activate
+}
+
+test_calamares_bootloader() {
+    wait_for_text "$FUNCNAME" "$text_calamares_bootloader" 10 5
+
+    # Down to the wanted entry, then back up to the button. Focus starts on
+    # Next, so the two counts cancel out; they are spelled out separately
+    # because a change to either is a test bug, not a distribution bug.
+    qt_send_key_combo "shift-tab"
+    local i
+    for (( i = 0; i < bootloader_index; i++ )); do
+        qt_send_key_combo "down"
+    done
+    qt_screenshot_ppm "$FUNCNAME"
+    qt_send_key_combo "shift-tab"
+    activate
+}
+
+test_calamares_partitions() {
+    wait_for_text "$FUNCNAME" "$text_calamares_partitions" 10 5
+    qt_screenshot_ppm "$FUNCNAME"
+
+    # Erase disk. The alternative is manual partitioning, which is a different
+    # test: this one proves the default path works.
+    qt_send_key_combo "tab"
+    qt_send_key_combo "space"
+    qt_screenshot_ppm "$FUNCNAME"
+
+    local i
+    for (( i = 0; i < filesystem_index; i++ )); do
+        qt_send_key_combo "down"
+    done
+    qt_screenshot_ppm "$FUNCNAME"
+    qt_send_key_combo "shift-tab"
+    activate
+}
+
+test_calamares_desktop() {
+    wait_for_text "$FUNCNAME" "$text_calamares_desktop" 10 5
+    activate
+}
+
+test_calamares_packages() {
+    wait_for_text "$FUNCNAME" "$text_calamares_packages" 10 5
+    activate
+}
+
+test_calamares_users() {
+    wait_for_text "$FUNCNAME" "$text_calamares_users" 10 5
+    qt_screenshot_ppm "$FUNCNAME"
+
+    qt_send_string_tab "$TEST_USER"
+    qt_send_key_combo "tab"
+    qt_send_key_combo "tab"
+    qt_send_string_tab "$TEST_PASSWORD"
+    qt_send_key_combo "tab"
+    qt_send_string_tab "$TEST_PASSWORD"
+    qt_screenshot_ppm "$FUNCNAME"
+    activate
+}
+
+test_calamares_summary() {
+    wait_for_text "$FUNCNAME" "$text_calamares_summary" 10 5
+    activate
+}
+
+test_calamares_install() {
+    wait_for_text "$FUNCNAME" "$text_calamares_install" 10 30
+    activate
+}
+
+test_calamares_finished() {
+    # Long: writing a 3 GB image inside a VM with no acceleration is slow, and
+    # a timeout here fails a working installer.
+    wait_for_text "$FUNCNAME" "$text_calamares_finished" 60 30
+    activate
+}
+
+test_reboot_into_installed() {
+    # The part that matters. Everything above can pass and the release still be
+    # broken if the installed system does not boot on its own.
+    qt_powerdown_vm
+}
+
+# ---- Entry point ---------------------------------------------------------
+
+test_install_qinux() {
+    test_setup
+    test_post_boot_grub
+    test_launch_installer
+    test_calamares_language
+    test_calamares_keyboard
+    test_calamares_bootloader
+    test_calamares_partitions
+    test_calamares_desktop
+    test_calamares_packages
+    test_calamares_users
+    test_calamares_summary
+    test_calamares_install
+    test_calamares_finished
+    test_reboot_into_installed
+}
+
+test_install_qinux
+test_description

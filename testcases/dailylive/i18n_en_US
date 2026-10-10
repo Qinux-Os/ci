@@ -1,0 +1,67 @@
+# Qinux installer test, English.
+#
+# The strings the automated install test looks for on screen, and their OCR
+# language. Read by the qemu test case in test_install.sh, via tesseract.
+#
+# Rewritten from Nexus Linux's i18n file, whose header carried a typo ("Linhx")
+# that is worth not repeating.
+#
+# Adding a language: copy this file to i18n_<locale>, translate the text_
+# values, and pass the locale to the test with TEST_LANG.
+
+# Language
+
+TESSERACT_LANG="eng"
+
+# GRUB
+
+text_console_gnu_grub="GNU GRUB"
+
+# Initial splash
+
+text_console_prompt_welcome="Welcome to Qinux!"
+text_console_prompt_login="localhost login"
+
+# Calamares Welcome
+
+text_calamares_welcome="Welcome to the Qinux installer"
+
+# Calamares Language
+
+text_calamares_language="The system language will be set to"
+
+# Calamares Keyboard
+
+text_calamares_keyboard="Keyboard model"
+
+# Calamares Bootloader
+
+text_calamares_bootloader="GRUB"
+
+# Calamares Partitions
+
+text_calamares_partitions="Erase disk"
+
+# Calamares Desktop
+
+text_calamares_desktop="Plasma Desktop"
+
+# Calamares Packages
+
+text_calamares_packages="Additional packages"
+
+# Calamares Users
+
+text_calamares_users="What name do you want to use to log in?"
+
+# Calamares Summary
+
+text_calamares_summary="This is an overview"
+
+# Calamares Install
+
+text_calamares_install="Continue with Installation"
+
+# Calamares Finished
+
+text_calamares_finished="All done"
